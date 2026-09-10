@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+backend/.venv/
+backend/data/
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+
+# runtime artifacts
+*.pid
+.playwright-cli/
+trends.yaml
+
+# 绿色免安装版打包产物与中间文件
+build/
+dist/
+
+# IDE / 编辑器工作区数据
+.codebuddy/
+.playwright-cli/
