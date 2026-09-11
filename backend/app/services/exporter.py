@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import io
-from datetime import datetime
+import re
 from typing import Optional
 
 from openpyxl import Workbook
@@ -11,6 +11,7 @@ from openpyxl.utils import get_column_letter
 
 from . import models_dao as dao
 from .i18n import tr
+from .template_store import normalize_text
 
 HEADER_FILL = PatternFill("solid", fgColor="0F766E")
 HEADER_FONT = Font(color="FFFFFF", bold=True, size=11, name="微软雅黑")
@@ -27,6 +28,7 @@ ABNORMAL_HIGH_FILL = PatternFill("solid", fgColor="FEF2F2")
 ABNORMAL_LOW_FILL = PatternFill("solid", fgColor="E0F2F1")
 THIN = Side(style="thin", color="CBD5E1")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+_INVALID_SHEET_CHARS = re.compile(r"[\[\]:*?/\\]")
 
 
 def _sheet_widths(ws, headers: list[str]) -> None:
@@ -102,21 +104,81 @@ def export_trend_xlsx(patient_id: int, item_norm: str, lang: Optional[str] = Non
     wb = Workbook()
     ws = wb.active
     ws.title = tr(lng, "sheet.trend")
-    headers = [tr(lng, "col.reportDate"), tr(lng, "col.testItem"), tr(lng, "col.value"),
-               tr(lng, "col.valueNum"), tr(lng, "col.unit"), tr(lng, "col.refLow"),
-               tr(lng, "col.refHigh"), tr(lng, "col.flag"), tr(lng, "col.source")]
+    headers = _trend_headers(lng)
     _write_header(ws, headers)
     for r in series:
-        ws.append([
-            r["report_date"], r["report_type"] or "", r["value_text"],
-            r["value_num"] if r["value_num"] is not None else "",
-            r["unit"] or "", r["ref_low"] if r["ref_low"] is not None else "",
-            r["ref_high"] if r["ref_high"] is not None else "",
-            _flag_text(r["flag"], lng),
-            r["source_filename"] or "",
-        ])
+        _append_trend_row(ws, r, lng)
     _sheet_widths(ws, headers)
     _style_body(ws)
+    return _to_bytes(wb)
+
+
+def _trend_headers(lng: str) -> list[str]:
+    """趋势/批量导出统一的列：报告日期 | 检验项目 | 报告类型 | …"""
+    return [tr(lng, "col.reportDate"), tr(lng, "col.testItem"), tr(lng, "col.reportType"),
+            tr(lng, "col.value"), tr(lng, "col.valueNum"), tr(lng, "col.unit"),
+            tr(lng, "col.refLow"), tr(lng, "col.refHigh"), tr(lng, "col.flag"),
+            tr(lng, "col.source")]
+
+
+def _append_trend_row(ws, r: dict, lng: str) -> None:
+    """写入一行趋势数据，并按异常标记整行着色。"""
+    ws.append([
+        r.get("report_date") or "",
+        r.get("item") or "",
+        r.get("report_type") or "",
+        r.get("value_text") or "",
+        r["value_num"] if r.get("value_num") is not None else "",
+        r.get("unit") or "",
+        r["ref_low"] if r.get("ref_low") is not None else "",
+        r["ref_high"] if r.get("ref_high") is not None else "",
+        _flag_text(r.get("flag") or "normal", lng),
+        r.get("source_filename") or "",
+    ])
+    fill = ABNORMAL_HIGH_FILL if r.get("flag") == "high" else (
+        ABNORMAL_LOW_FILL if r.get("flag") == "low" else None)
+    if fill:
+        for cell in ws[ws.max_row]:
+            cell.fill = fill
+
+
+def _safe_sheet_name(name: str, used: set[str]) -> str:
+    """生成合法且不重复的工作表名（Excel 限制 31 字符、禁用 []:*?/\\）。"""
+    base = _INVALID_SHEET_CHARS.sub("", (name or "").strip())[:28] or "item"
+    candidate, i = base, 1
+    while candidate in used:
+        i += 1
+        candidate = f"{base[:24]}_{i}"
+    used.add(candidate)
+    return candidate
+
+
+def export_items_xlsx(patient_id: int, items: list[str], lang: Optional[str] = None) -> bytes:
+    """批量导出多个检验项目的历次序列：首张为汇总表，其余每个项目一张表。"""
+    lng = lang or "zh-CN"
+    wb = Workbook()
+    summary = wb.active
+    summary.title = tr(lng, "sheet.summary")
+    headers = _trend_headers(lng)
+    _write_header(summary, headers)
+    used = {summary.title}
+
+    for raw in items:
+        norm = normalize_text(raw)
+        series = dao.trend_series(patient_id, norm)
+        if not series:
+            continue
+        for r in series:
+            _append_trend_row(summary, r, lng)
+        ws = wb.create_sheet(_safe_sheet_name(series[0].get("item") or raw, used))
+        _write_header(ws, headers)
+        for r in series:
+            _append_trend_row(ws, r, lng)
+        _sheet_widths(ws, headers)
+        _style_body(ws)
+
+    _sheet_widths(summary, headers)
+    _style_body(summary)
     return _to_bytes(wb)
 
 

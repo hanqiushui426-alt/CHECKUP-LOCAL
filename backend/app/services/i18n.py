@@ -58,6 +58,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "col.refHigh": "参考上限",
         "col.flag": "异常",
         "col.source": "来源文件",
+        "col.reportType": "报告类型",
+        "sheet.summary": "全部明细",
+        "export.noItems": "请至少选择一个检验项目",
     },
     "en-US": {
         "report.notFound": "Report not found",
@@ -105,6 +108,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "col.refHigh": "Reference high",
         "col.flag": "Flag",
         "col.source": "Source file",
+        "col.reportType": "Report type",
+        "sheet.summary": "All details",
+        "export.noItems": "Select at least one test item",
     },
 }
 

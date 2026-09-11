@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from ..services import models_dao as dao
@@ -29,6 +29,34 @@ def export_results(patient_id: Optional[int] = Query(None), item: Optional[str] 
                    date_to: Optional[str] = Query(None), lang: Optional[str] = Query(None)):
     data = exporter.export_results_xlsx(patient_id, item, report_type, date_from, date_to, lang)
     return _xlsx_response(data, "checkup-results.xlsx")
+
+
+@router.get("/items.xlsx")
+def export_items(patient_id: int = Query(...), items: str = Query(...),
+                 lang: Optional[str] = Query(None)):
+    """批量导出多个检验项目的历次序列（项目名用 | 分隔，避免名称自带逗号）。"""
+    lng = normalize(lang)
+    if not dao.get_patient(patient_id):
+        raise HTTPException(404, tr(lng, "patient.notFound"))
+    names = [x.strip() for x in items.split("|") if x.strip()]
+    if not names:
+        raise HTTPException(400, tr(lng, "export.noItems"))
+    data = exporter.export_items_xlsx(patient_id, names, lang)
+    return _xlsx_response(data, "checkup-items.xlsx")
+
+
+@router.post("/items.xlsx")
+def export_items_post(payload: dict = Body(...)):
+    """批量导出（POST 版）：项目较多时用 JSON 传参，避免 URL 过长。"""
+    lng = normalize((payload or {}).get("lang"))
+    patient_id = int((payload or {}).get("patient_id") or 0)
+    if not patient_id or not dao.get_patient(patient_id):
+        raise HTTPException(404, tr(lng, "patient.notFound"))
+    names = [str(x).strip() for x in ((payload or {}).get("items") or []) if str(x).strip()]
+    if not names:
+        raise HTTPException(400, tr(lng, "export.noItems"))
+    data = exporter.export_items_xlsx(patient_id, names, lng)
+    return _xlsx_response(data, "checkup-items.xlsx")
 
 
 @router.get("/trend.xlsx")

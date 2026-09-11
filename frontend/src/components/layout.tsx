@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import {
-  Activity, FileText, Globe, Languages, UploadCloud, Users, LineChart, SlidersHorizontal, ShieldCheck,
+  Activity, FileText, Languages, UploadCloud, Users, LineChart, ShieldCheck,
 } from "lucide-react";
 import { cn } from "./ui";
 import { LANGS, useI18n, type Lang } from "../i18n";
@@ -10,7 +10,6 @@ const NAV = [
   { to: "/import", key: "nav.import", icon: UploadCloud },
   { to: "/patients", key: "nav.patients", icon: Users },
   { to: "/trends", key: "nav.trends", icon: LineChart },
-  { to: "/templates", key: "nav.templates", icon: SlidersHorizontal },
 ];
 
 export default function Layout() {

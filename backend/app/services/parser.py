@@ -24,7 +24,9 @@ from .pdf_service import Line
 from .template_store import normalize_text
 
 _NUM = r"-?\d+(?:\.\d+)?"
-_REF_RANGE = re.compile(rf"^\s*(?:\(|（)?\s*({_NUM})\s*[-~—–至]\s*({_NUM})\s*(?:\)|）)?\s*$")
+# 参考区间分隔符需覆盖全角波浪号（检验报告常用「～」，如 98～110）
+_REF_SEP = "-~～〜—–－—至"
+_REF_RANGE = re.compile(rf"^\s*(?:\(|（)?\s*({_NUM})\s*[{_REF_SEP}]\s*({_NUM})\s*(?:\)|）)?\s*$")
 _REF_SINGLE_LOW = re.compile(rf"^\s*[<>≤≥]?\s*({_NUM})\s*$")
 _VALUE_WITH_MARK = re.compile(rf"^\s*([<>≤≥↑↓]?)\s*({_NUM})\s*([↑↓HL]?)\s*$")
 _ARROWS = {"↑": "high", "↓": "low", "H": "high", "L": "low", "偏高": "high", "偏低": "low", "高": "high", "低": "low"}
