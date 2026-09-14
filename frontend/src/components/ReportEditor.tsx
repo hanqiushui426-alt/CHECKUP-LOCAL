@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { FileSearch, Plus, RotateCcw, Save, Trash2, XCircle } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, FileSearch, Plus, RotateCcw, Save, Search, Trash2, XCircle } from "lucide-react";
 import { api, notify, toastError } from "../api";
 import { Badge, Modal, Spinner, cn } from "./ui";
 import { useI18n } from "../i18n";
@@ -11,10 +11,12 @@ const emptyItem = (): ResultItem => ({
 });
 
 /** 报告编辑器：左侧报告原文/页图，右侧可改患者信息、报告信息与检验行。
- *  mode=report 编辑已入库报告；mode=review 处理待核对记录。 */
-export default function ReportEditor({ mode, id, onClose, onSaved }: {
+ *  mode=report 编辑已入库报告；mode=review 处理待核对记录。
+ *  focusItem：打开时自动滚动并高亮该检验项目（从趋势图/报告明细跳进来改错时用）。 */
+export default function ReportEditor({ mode, id, focusItem, onClose, onSaved }: {
   mode: "report" | "review";
   id: number;
+  focusItem?: string;
   onClose: () => void;
   onSaved?: () => void;
 }) {
@@ -36,6 +38,26 @@ export default function ReportEditor({ mode, id, onClose, onSaved }: {
   const [confidence, setConfidence] = useState<number | null>(null);
   const [templates, setTemplates] = useState<TemplateMeta[]>([]);
   const [selTemplate, setSelTemplate] = useState("");
+  const [filter, setFilter] = useState("");
+  const rowRefs = useRef<Record<number, HTMLTableRowElement | null>>({});
+
+  /** 定位目标行：归一化后比较，容忍空白/大小写/括号差异 */
+  const focusIndex = useMemo(() => {
+    if (!focusItem) return -1;
+    const norm = (s: string) => (s || "").replace(/\s+/g, "").toLowerCase();
+    const f = norm(focusItem);
+    if (!f) return -1;
+    return rows.findIndex((r) => {
+      const it = norm(r.item);
+      return !!it && (it === f || it.includes(f) || f.includes(it));
+    });
+  }, [rows, focusItem]);
+
+  useEffect(() => {
+    if (loading || focusIndex < 0) return;
+    const el = rowRefs.current[focusIndex];
+    if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [focusIndex, loading]);
 
   useEffect(() => {
     api.get<TemplateMeta[]>("/api/templates").then(setTemplates).catch(() => {});
@@ -138,6 +160,42 @@ export default function ReportEditor({ mode, id, onClose, onSaved }: {
     }
   }
 
+  const pendingRows = rows.filter((r) => r.confirm_pending);
+
+  /** 处理"人工修改 vs 本次识别结果"的待确认项：keep=保留人工值，adopt=采用识别值 */
+  async function resolvePending(mode: "keep" | "adopt", only?: ResultItem) {
+    const actions: Record<string, string> = {};
+    if (only) {
+      actions[only.item] = mode;
+    } else {
+      pendingRows.forEach((r) => { actions[r.item] = mode; });
+    }
+    if (!Object.keys(actions).length) return;
+    setSaving(true);
+    try {
+      const res = await api.post<any>(`/api/reports/${id}/confirm-manual`, { actions });
+      if (res?.report?.results) setRows(res.report.results.map((x: any) => ({ ...x })));
+      notify(t("editor.pendingResolved"), "success");
+      onSaved?.();
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** 本次识别值（用于待确认行提示） */
+  function recognizedText(r: ResultItem): string {
+    if (!r.recognized_json) return t("editor.notRecognized");
+    try {
+      const v = JSON.parse(r.recognized_json);
+      return `${t("editor.recognizedAs")} ${v.value_text || "—"}${
+        v.unit ? " " + v.unit : ""}${v.flag && v.flag !== "normal" ? " · " + v.flag : ""}`;
+    } catch {
+      return "";
+    }
+  }
+
   return (
     <Modal width="max-w-6xl" title={`${mode === "report" ? t("editor.editTitle") : t("editor.reviewTitle")} · ${filename}`}
       onClose={onClose}
@@ -174,6 +232,22 @@ export default function ReportEditor({ mode, id, onClose, onSaved }: {
           {warnings.map((w, i) => (
             <div key={i} className="mb-3 rounded-lg bg-amber-50 border border-amber-100 text-amber-700 text-xs px-3 py-2">{w}</div>
           ))}
+          {mode === "report" && pendingRows.length > 0 && (
+            <div className="mb-3 rounded-xl bg-amber-50 border border-amber-200 px-3 py-2.5 text-sm">
+              <div className="flex flex-wrap items-center gap-2 text-amber-800">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{t("editor.pendingHint", { n: pendingRows.length })}</span>
+                <button className="btn-ghost !py-1 ml-auto" disabled={saving}
+                  onClick={() => resolvePending("keep")}>
+                  {t("editor.keepAll")}
+                </button>
+                <button className="btn-ghost !py-1" disabled={saving}
+                  onClick={() => resolvePending("adopt")}>
+                  {t("editor.adoptAll")}
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="grid lg:grid-cols-[minmax(0,44%),1fr] gap-5">
             <div className="rounded-xl border border-slate-100 overflow-hidden bg-slate-50/50">
@@ -206,8 +280,16 @@ export default function ReportEditor({ mode, id, onClose, onSaved }: {
                 <Field label={t("editor.hospital")}><input className="input" value={hospital} onChange={(e) => setHospital(e.target.value)} /></Field>
               </div>
 
-              <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2 mb-2">
                 <div className="text-sm font-medium text-ink">{t("editor.resultsTitle", { n: rows.length })}</div>
+                {focusIndex >= 0 && (
+                  <Badge tone="amber">{t("editor.located", { item: rows[focusIndex]?.item || focusItem || "" })}</Badge>
+                )}
+                <div className="relative ml-auto w-48">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-300" />
+                  <input className="input !py-1 !pl-8 text-xs" value={filter}
+                    placeholder={t("editor.filterPlaceholder")} onChange={(e) => setFilter(e.target.value)} />
+                </div>
                 <button className="btn-ghost !py-1" onClick={() => setRows((r) => [...r, emptyItem()])}>
                   <Plus className="w-3.5 h-3.5" />{t("editor.addRow")}</button>
               </div>
@@ -218,19 +300,41 @@ export default function ReportEditor({ mode, id, onClose, onSaved }: {
                     <th className="th w-28">{t("editor.col.ref")}</th><th className="th w-20">{t("editor.col.flag")}</th><th className="th w-8"></th>
                   </tr></thead>
                   <tbody>
-                    {rows.map((r, i) => (
-                      <tr key={i} className={cn(r.flag === "high" && "bg-red-50/60", r.flag === "low" && "bg-primary-50/50")}>
-                        <td className="td"><input className="input !py-1 text-xs" value={r.item} onChange={(e) => updateRow(i, { item: e.target.value })} /></td>
+                    {rows.map((r, i) => ({ r, i }))
+                      .filter(({ r }) => !filter.trim() || (r.item || "").includes(filter.trim()))
+                      .map(({ r, i }) => (
+                      <tr key={i} ref={(el) => { rowRefs.current[i] = el; }}
+                        className={cn("transition",
+                          r.flag === "high" && "bg-red-50/60", r.flag === "low" && "bg-primary-50/50",
+                          r.confirm_pending && "bg-amber-100/60",
+                          i === focusIndex && "ring-2 ring-inset ring-amber-400 bg-amber-50/80")}>
+                        <td className="td">
+                          <input className="input !py-1 text-xs" value={r.item} onChange={(e) => updateRow(i, { item: e.target.value })} />
+                          {r.confirm_pending ? (
+                            <div className="text-[10px] text-amber-700 mt-0.5 truncate" title={recognizedText(r)}>
+                              ⚠ {t("editor.pendingBadge")} · {recognizedText(r)}
+                            </div>
+                          ) : null}
+                        </td>
                         <td className="td"><input className="input !py-1 text-xs" value={r.value_text} onChange={(e) => updateRow(i, { value_text: e.target.value })} /></td>
                         <td className="td"><input className="input !py-1 text-xs" value={r.unit} onChange={(e) => updateRow(i, { unit: e.target.value })} /></td>
                         <td className="td"><input className="input !py-1 text-xs" value={r.ref_text} onChange={(e) => updateRow(i, { ref_text: e.target.value })} /></td>
                         <td className="td">
-                          <select className="input !py-1 text-xs" value={r.flag === "normal" ? "" : r.flag}
-                            onChange={(e) => updateRow(i, { flag: (e.target.value || "normal") as any })}>
-                            <option value="">{t("editor.flag.auto")}</option><option value="high">{t("editor.flag.highMark")}</option><option value="low">{t("editor.flag.lowMark")}</option>
+                          <select className="input !py-1 text-xs" value={uiFlag(r)}
+                            onChange={(e) => updateRow(i, { flag: e.target.value as any })}>
+                            <option value="auto">{t("editor.flag.auto")}</option>
+                            <option value="normal">{t("editor.flag.normal")}</option>
+                            <option value="high">{t("editor.flag.highMark")}</option>
+                            <option value="low">{t("editor.flag.lowMark")}</option>
                           </select>
                         </td>
-                        <td className="td text-right">
+                        <td className="td text-right whitespace-nowrap">
+                          {r.confirm_pending ? (
+                            <button className="text-[10px] text-amber-700 underline mr-1 cursor-pointer"
+                              onClick={() => resolvePending("adopt", r)}>
+                              {t("editor.adoptNew")}
+                            </button>
+                          ) : null}
                           <button className="text-slate-300 hover:text-danger cursor-pointer"
                             onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}>
                             <Trash2 className="w-3.5 h-3.5" />
@@ -243,6 +347,9 @@ export default function ReportEditor({ mode, id, onClose, onSaved }: {
                 {rows.length === 0 && (
                   <div className="text-center text-xs text-ink-faint py-6">{t("editor.noRows")}</div>
                 )}
+                {rows.length > 0 && !!filter.trim() && !rows.some((r) => (r.item || "").includes(filter.trim())) && (
+                  <div className="text-center text-xs text-ink-faint py-6">{t("editor.noMatch")}</div>
+                )}
               </div>
               <p className="text-[11px] text-ink-faint mt-2">
                 {t("editor.renameHint")}
@@ -253,6 +360,12 @@ export default function ReportEditor({ mode, id, onClose, onSaved }: {
       )}
     </Modal>
   );
+}
+
+/** 表单里需要区分"自动"与"正常"：未人工指定的 normal 显示为"自动"。 */
+function uiFlag(r: ResultItem): string {
+  if (r.flag === "normal") return r.manual ? "normal" : "auto";
+  return r.flag;
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

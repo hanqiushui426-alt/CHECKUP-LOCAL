@@ -11,7 +11,7 @@ from ..services import ingestion
 from ..services import models_dao as dao
 from ..services import parser as parser_mod
 from ..services import pdf_service
-from ..services.archive import update_report
+from ..services.archive import finalize_item, merge_reparse, update_report
 from ..services.i18n import normalize, tr
 from ..services.ingestion import rel_abs
 from ..services.patient_matcher import resolve_patient
@@ -26,6 +26,12 @@ def list_reports(patient_id: Optional[int] = Query(None), report_type: Optional[
                  date_to: Optional[str] = Query(None), offset: int = 0,
                  limit: int = Query(100, le=1000)):
     return dao.list_reports(patient_id, report_type, item, date_from, date_to, offset, limit)
+
+
+@router.get("/pending-confirm")
+def pending_confirm():
+    """列出含"重解析待确认"检验行的报告（人工改过、又被重新识别的项）。"""
+    return {"items": dao.list_pending_confirm()}
 
 
 @router.get("/{report_id}")
@@ -114,8 +120,11 @@ def _reparse_one(report: dict, template_id: Optional[str] = None,
         "report_type": candidate.get("report_type") or report.get("report_type") or "检验",
         "hospital": candidate.get("hospital"),
     }
-    dao.replace_report_content(report["id"], patient_id, meta, raw_text,
-                               candidate.get("items") or [])
+    # 人工修改过的行不被覆盖：保留人工值并标记"待确认"，同时记录本次识别结果
+    new_items = [finalize_item(i) for i in (candidate.get("items") or [])]
+    new_items = [i for i in new_items if i["item"]]
+    merged = merge_reparse(report.get("results") or [], new_items)
+    dao.replace_report_content(report["id"], patient_id, meta, raw_text, merged)
     return dao.get_report(report["id"])
 
 
@@ -129,6 +138,25 @@ def reparse_report(report_id: int, payload: dict = Body(default={})):
     dao.log_activity("reparse", "log.reparseOne", {
         "file": report.get("source_filename") or str(report_id)})
     return result
+
+
+@router.post("/{report_id}/confirm-manual")
+def confirm_manual(report_id: int, payload: dict = Body(default={})):
+    """处理重解析待确认项。
+
+    payload: {"actions": {"项目名": "keep" | "adopt"}}
+      keep  —— 保留人工修改值；
+      adopt —— 采用本次重新识别的值。
+    未在 actions 中出现的项默认按 keep 处理。
+    """
+    report = dao.get_report(report_id)
+    if not report:
+        raise HTTPException(404, tr(None, "report.notFound"))
+    actions = (payload or {}).get("actions") or {}
+    n = dao.resolve_pending_confirm(report_id, actions)
+    dao.log_activity("edit", "log.confirmManual", {
+        "file": report.get("source_filename") or str(report_id), "n": n})
+    return {"ok": True, "resolved": n, "report": dao.get_report(report_id)}
 
 
 @router.post("/reparse-all")

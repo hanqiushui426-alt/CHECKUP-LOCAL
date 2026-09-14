@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { ArrowLeft, Calendar, FileText, Pencil, Plus, RefreshCw, Search, Trash2, UserRound, Users } from "lucide-react";
 import { api, notify, toastError } from "../api";
 import { Badge, Card, ConfirmDialog, Empty, Modal, Spinner, cn, useAppRefresh } from "../components/ui";
 import ReportEditor from "../components/ReportEditor";
 import { useI18n } from "../i18n";
-import type { Patient, Report, ReviewSummary } from "../types";
+import type { Patient, PendingConfirm, Report, ReviewSummary } from "../types";
 
 interface ReportDetail extends Report { results: any[]; patient: Patient | null }
 
@@ -31,16 +32,54 @@ export default function PatientsPage() {
   const [creating, setCreating] = useState<NewPatient | null>(null);
   const [busyReport, setBusyReport] = useState<number | null>(null);
   const [pending, setPending] = useState<ReviewSummary[]>([]);
-  const [editor, setEditor] = useState<{ mode: "report" | "review"; id: number } | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm[]>([]);
+  const [editor, setEditor] = useState<{ mode: "report" | "review"; id: number; focusItem?: string } | null>(null);
+  const [sp, setSp] = useSearchParams();
+  const jumpHandled = useRef(false);
+
+  // 从「趋势分析」跳转进来：/patients?patient=1&report=2&item=白细胞计数
+  // 自动选中患者、打开该报告编辑器并定位到该项目
+  useEffect(() => {
+    if (jumpHandled.current || loading || !list.length) return;
+    const pid = Number(sp.get("patient") || 0);
+    if (!pid) return;
+    jumpHandled.current = true;
+    const rid = Number(sp.get("report") || 0);
+    const focus = sp.get("item") || undefined;
+    const next = new URLSearchParams(sp);
+    next.delete("patient"); next.delete("report"); next.delete("item");
+    setSp(next, { replace: true });
+    const p = list.find((x) => x.id === pid);
+    if (p) {
+      open(p, list)
+        .then(() => { if (rid) setEditor({ mode: "report", id: rid, focusItem: focus }); })
+        .catch(toastError);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [list, loading, sp, setSp]);
 
   const loadPending = useCallback(async () => {
     const r = await api.get<{ items: ReviewSummary[] }>("/api/review?status=pending&limit=200");
     setPending(r.items);
   }, []);
 
+  // 已入库报告中"人工改过、又被重新识别"的待确认项
+  const loadPendingConfirm = useCallback(async () => {
+    const r = await api.get<{ items: PendingConfirm[] }>("/api/reports/pending-confirm");
+    setPendingConfirm(r.items);
+  }, []);
+
+  /** 打开某份报告并定位（用于待确认项跳转） */
+  async function openReportForConfirm(pid: number | null | undefined, rid: number, item?: string) {
+    const p = list.find((x) => x.id === pid);
+    if (p) await open(p, list);
+    setEditor({ mode: "report", id: rid, focusItem: item });
+  }
+
   async function onEditorSaved() {
     setEditor(null);
     await loadPending().catch(() => {});
+    await loadPendingConfirm().catch(() => {});
     const all = await load();
     if (sel) await open(sel, all);
   }
@@ -54,12 +93,14 @@ export default function PatientsPage() {
   useEffect(() => {
     load().catch(toastError).finally(() => setLoading(false));
     loadPending().catch(() => {});
-  }, [load, loadPending]);
+    loadPendingConfirm().catch(() => {});
+  }, [load, loadPending, loadPendingConfirm]);
 
   // 切换左侧栏目时自动刷新
   useAppRefresh(() => {
     load().catch(() => {});
     loadPending().catch(() => {});
+    loadPendingConfirm().catch(() => {});
   });
 
   async function open(p: Patient, all: Patient[] = list) {
@@ -218,10 +259,10 @@ export default function PatientsPage() {
       </Card>
 
       <div className="space-y-5">
-        <Card title={t("patients.pendingTitle", { n: pending.length })}
-          extra={<Badge tone={pending.length ? "amber" : "green"}>
-            {pending.length ? t("patients.pendingNeed") : t("patients.pendingNone")}</Badge>}>
-          {pending.length === 0 ? (
+        <Card title={t("patients.pendingTitle", { n: pending.length + pendingConfirm.length })}
+          extra={<Badge tone={(pending.length + pendingConfirm.length) ? "amber" : "green"}>
+            {(pending.length + pendingConfirm.length) ? t("patients.pendingNeed") : t("patients.pendingNone")}</Badge>}>
+          {pending.length === 0 && pendingConfirm.length === 0 ? (
             <div className="text-xs text-ink-faint py-1">
               {t("patients.pendingEmpty")}
             </div>
@@ -241,6 +282,29 @@ export default function PatientsPage() {
                   <Badge tone="amber">{t("patients.goReview")}</Badge>
                 </button>
               ))}
+
+              {pendingConfirm.length > 0 && (
+                <div className={cn("space-y-2", pending.length > 0 && "pt-2.5 mt-1 border-t border-amber-100")}>
+                  <div className="text-xs font-medium text-amber-700">
+                    {t("patients.confirmTitle", { n: pendingConfirm.length })}
+                  </div>
+                  {pendingConfirm.map((p) => (
+                    <button key={p.report_id}
+                      onClick={() => openReportForConfirm(p.patient_id, p.report_id, p.items[0]?.item)}
+                      className="w-full flex items-center justify-between gap-3 rounded-xl border border-amber-100 bg-white px-4 py-3 hover:bg-amber-50 text-left cursor-pointer">
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-ink truncate">
+                          {p.patient_name || t("patients.unknownName")} · {p.source_filename}
+                        </div>
+                        <div className="text-xs text-ink-faint mt-0.5">
+                          {p.report_date || t("patients.noDate")} · {p.report_type || "—"} · {t("patients.confirmCount", { n: p.n })}
+                        </div>
+                      </div>
+                      <Badge tone="amber">{t("patients.goConfirm")}</Badge>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </Card>
@@ -318,7 +382,10 @@ export default function PatientsPage() {
                           </button>
                         </div>
                       </div>
-                      {openReports[r.id] && <ReportItems report={openReports[r.id]} />}
+                      {openReports[r.id] && (
+                        <ReportItems report={openReports[r.id]}
+                          onEditItem={(item) => setEditor({ mode: "report", id: r.id, focusItem: item })} />
+                      )}
                     </div>
                   ))}
                 </div>
@@ -329,7 +396,8 @@ export default function PatientsPage() {
       </div>
 
       {editor && (
-        <ReportEditor mode={editor.mode} id={editor.id} onClose={() => setEditor(null)} onSaved={onEditorSaved} />
+        <ReportEditor mode={editor.mode} id={editor.id} focusItem={editor.focusItem}
+          onClose={() => setEditor(null)} onSaved={onEditorSaved} />
       )}
 
       {creating && (
@@ -401,7 +469,10 @@ function nameSimilar(a: string, b: string): boolean {
   return inter / Math.min(sx.size, sy.size) >= 0.5;
 }
 
-function ReportItems({ report }: { report: ReportDetail | null }) {
+function ReportItems({ report, onEditItem }: {
+  report: ReportDetail | null;
+  onEditItem?: (item: string) => void;
+}) {
   const { t } = useI18n();
   if (!report) return <Spinner text="" />;
   return (
@@ -411,6 +482,7 @@ function ReportItems({ report }: { report: ReportDetail | null }) {
           <th className="th !bg-transparent">{t("editor.col.item")}</th><th className="th !bg-transparent">{t("editor.col.value")}</th>
           <th className="th !bg-transparent">{t("editor.col.unit")}</th><th className="th !bg-transparent">{t("editor.col.ref")}</th>
           <th className="th !bg-transparent">{t("editor.col.flag")}</th>
+          <th className="th !bg-transparent w-10"></th>
         </tr></thead>
         <tbody>
           {report.results.map((it, i) => (
@@ -421,6 +493,14 @@ function ReportItems({ report }: { report: ReportDetail | null }) {
               <td className="td text-ink-soft">{it.ref_text}</td>
               <td className="td">{it.flag === "normal" ? "—" :
                 <Badge tone={it.flag === "high" ? "red" : "blue"}>{it.flag === "high" ? t("editor.flag.high") : t("editor.flag.low")}</Badge>}</td>
+              <td className="td text-right">
+                {onEditItem && (
+                  <button className="p-1 text-slate-300 hover:text-primary-600 cursor-pointer" title={t("patients.editItem")}
+                    onClick={() => onEditItem(it.item)}>
+                    <Pencil className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>

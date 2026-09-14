@@ -23,8 +23,10 @@ Log "index cleared"
 $readme = (Get-ChildItem $wd -File -Filter *.txt | Select-Object -First 1).Name
 $sp = "runtime/python/Lib/site-packages"
 $big = @("cv2", "pymupdf", "onnxruntime", "numpy", "numpy.libs", "rapidocr_onnxruntime", "PIL", "pip")
-$small = Get-ChildItem (Join-Path $wd $sp) -Directory |
-  Where-Object { $big -notcontains $_.Name } | ForEach-Object { "$sp/$($_.Name)" }
+$small = @(Get-ChildItem (Join-Path $wd $sp) -Directory |
+  Where-Object { $big -notcontains $_.Name } | ForEach-Object { "$sp/$($_.Name)" })
+# site-packages 根目录下还有零散的单文件（six.py、typing_extensions.py 等），不能漏
+$small += @(Get-ChildItem (Join-Path $wd $sp) -File | ForEach-Object { "$sp/$($_.Name)" })
 
 $batches = [ordered]@{
   "app files (backend / web / launcher)" = @(".gitignore", "start.bat", $readme, "web", "backend")

@@ -11,7 +11,15 @@ from pathlib import Path
 
 from .config import DATA_DIR, DB_PATH, ensure_dirs
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# 检验行的人工修改留痕 / 重解析待确认（旧库通过 _migrate 增量添加）
+_RESULT_EXTRA_COLUMNS = [
+    ("manual", "INTEGER NOT NULL DEFAULT 0"),          # 1=该行被人工修改过
+    ("manual_json", "TEXT"),                           # 人工修改后的整行快照
+    ("confirm_pending", "INTEGER NOT NULL DEFAULT 0"), # 1=重解析后需人工确认
+    ("recognized_json", "TEXT"),                       # 重解析得到的新识别值（供对比）
+]
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS batches (
@@ -83,6 +91,10 @@ CREATE TABLE IF NOT EXISTS results (
     ref_low    REAL,
     ref_high   REAL,
     flag       TEXT NOT NULL DEFAULT 'normal',  -- high | low | normal
+    manual     INTEGER NOT NULL DEFAULT 0,      -- 1=该行被人工修改过
+    manual_json TEXT,                           -- 人工修改后的整行快照
+    confirm_pending INTEGER NOT NULL DEFAULT 0, -- 1=重解析后待人工确认
+    recognized_json TEXT,                       -- 重解析得到的新识别值
     seq        INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
@@ -147,11 +159,18 @@ def get_conn():
         conn.close()
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """为旧库增量补齐新增列（幂等）。"""
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(results)")}
+    for name, ddl in _RESULT_EXTRA_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE results ADD COLUMN {name} {ddl}")
+
+
 def init_db() -> None:
     """初始化数据目录与 schema。"""
     ensure_dirs()
     with get_conn() as conn:
-        version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version < SCHEMA_VERSION:
-            conn.executescript(_SCHEMA_SQL)
-            conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.executescript(_SCHEMA_SQL)
+        _migrate(conn)
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")

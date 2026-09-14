@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Download, TrendingUp, Users } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Download, Pencil, TrendingUp, Users } from "lucide-react";
 import { api, notify, toastError } from "../api";
 import { EChart, fmt } from "../components/chart";
 import { Badge, Card, Empty, Modal, SearchSelect, Spinner, cn, useAppRefresh } from "../components/ui";
@@ -8,6 +9,7 @@ import type { Patient, PatientItemStat, TrendPoint } from "../types";
 
 export default function TrendsPage() {
   const { t, lang } = useI18n();
+  const nav = useNavigate();
   const [patients, setPatients] = useState<Patient[]>([]);
   const [pid, setPid] = useState<number | "">("");
   const [items, setItems] = useState<PatientItemStat[]>([]);
@@ -167,20 +169,26 @@ export default function TrendsPage() {
             <table className="w-full">
               <thead className="sticky top-0"><tr>
                 <th className="th">{t("trend.col.date")}</th><th className="th">{t("trend.col.value")}</th><th className="th">{t("trend.col.unit")}</th>
-                <th className="th">{t("trend.col.ref")}</th><th className="th">{t("trend.col.status")}</th><th className="th">{t("trend.col.source")}</th>
+                <th className="th">{t("trend.col.ref")}</th><th className="th">{t("trend.col.status")}</th>                <th className="th">{t("trend.col.source")}</th>
+              <th className="th w-10"></th>
               </tr></thead>
               <tbody>
-                {data.series.map((p) => (
-                  <tr key={p.report_id} className={p.flag === "high" ? "bg-red-50/50" : p.flag === "low" ? "bg-primary-50/40" : ""}>
-                    <td className="td font-medium">{p.report_date}</td>
-                    <td className="td font-semibold">{p.value_text}{p.flag === "high" ? " ↑" : p.flag === "low" ? " ↓" : ""}</td>
-                    <td className="td text-ink-soft">{p.unit}</td>
-                    <td className="td text-ink-soft">{p.ref_text || "—"}</td>
-                    <td className="td">{p.flag === "normal" ? <span className="text-good">{t("trend.normal")}</span> :
-                      <Badge tone={p.flag === "high" ? "red" : "blue"}>{p.flag === "high" ? t("trend.high") : t("trend.low")}</Badge>}</td>
-                    <td className="td text-ink-faint text-xs truncate max-w-[220px]">{p.report_type} · {p.source_filename}</td>
-                  </tr>
-                ))}
+              {data.series.map((p) => (
+                <tr key={p.report_id}
+                  title={t("trend.clickToEdit")}
+                  onClick={() => nav(`/patients?patient=${pid}&report=${p.report_id}&item=${encodeURIComponent(p.item)}`)}
+                  className={cn("cursor-pointer transition hover:bg-slate-100/70",
+                    p.flag === "high" ? "bg-red-50/50" : p.flag === "low" ? "bg-primary-50/40" : "")}>
+                  <td className="td font-medium">{p.report_date}</td>
+                  <td className="td font-semibold">{p.value_text}{p.flag === "high" ? " ↑" : p.flag === "low" ? " ↓" : ""}</td>
+                  <td className="td text-ink-soft">{p.unit}</td>
+                  <td className="td text-ink-soft">{p.ref_text || "—"}</td>
+                  <td className="td">{p.flag === "normal" ? <span className="text-good">{t("trend.normal")}</span> :
+                    <Badge tone={p.flag === "high" ? "red" : "blue"}>{p.flag === "high" ? t("trend.high") : t("trend.low")}</Badge>}</td>
+                  <td className="td text-ink-faint text-xs truncate max-w-[220px]">{p.report_type} · {p.source_filename}</td>
+                  <td className="td text-right"><Pencil className="w-3.5 h-3.5 text-slate-300" /></td>
+                </tr>
+              ))}
               </tbody>
             </table>
           </div>
@@ -197,13 +205,15 @@ export default function TrendsPage() {
                 {exporting ? t("trend.batch.exporting") : t("trend.batch.confirm", { n: sel.length })}
               </button>
             </>}>
-          <div className="flex items-center gap-2 mb-3">
+          <div className="flex items-center gap-2 mb-2">
             <input className="input" value={kw} placeholder={t("trend.batch.filter")}
               onChange={(e) => setKw(e.target.value)} />
             <button className="btn-ghost whitespace-nowrap" onClick={() => setSel(filtered.map((i) => i.item))}>{t("trend.batch.all")}</button>
+            <button className="btn-ghost whitespace-nowrap" onClick={() => setSel(items.map((i) => i.item))}>{t("trend.batch.allAll", { n: items.length })}</button>
             <button className="btn-ghost whitespace-nowrap" onClick={() => setSel([])}>{t("trend.batch.none")}</button>
             <span className="text-xs text-ink-faint whitespace-nowrap">{t("trend.batch.selected", { n: sel.length })}</span>
           </div>
+          <div className="text-[11px] text-ink-faint mb-3">{t("trend.batch.hint")}</div>
           <div className="grid sm:grid-cols-2 gap-1.5 max-h-[52vh] overflow-y-auto pr-1">
             {filtered.map((it) => {
               const checked = sel.includes(it.item);

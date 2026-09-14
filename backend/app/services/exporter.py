@@ -6,6 +6,9 @@ import re
 from typing import Optional
 
 from openpyxl import Workbook
+from openpyxl.chart import LineChart, Reference
+from openpyxl.chart.marker import Marker
+from openpyxl.chart.shapes import GraphicalProperties
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -110,36 +113,117 @@ def export_trend_xlsx(patient_id: int, item_norm: str, lang: Optional[str] = Non
         _append_trend_row(ws, r, lng)
     _sheet_widths(ws, headers)
     _style_body(ws)
+    _hide_aux_columns(ws)
+    name = (series[0].get("item") if series else None) or item_norm
+    unit = next((r.get("unit") for r in series if r.get("unit")), "") or ""
+    _add_trend_chart(ws, f"{name} · {tr(lng, 'sheet.trend')}", unit)
     return _to_bytes(wb)
 
 
+# 趋势图配色（与页面一致）
+_C_LINE = "0F766E"
+_C_HIGH = "DC2626"
+_C_LOW = "2563EB"
+_C_REF = "F59E0B"
+# 数据区列序（1 起）：报告日期 检验项目 报告类型 结果 数值 单位 参考下限 参考上限 异常 来源文件
+_COL_VALUE = 5
+_COL_REF_LOW = 7
+_COL_REF_HIGH = 8
+_COL_HIGH_PT = 11   # 辅助列：仅偏高点的数值
+_COL_LOW_PT = 12    # 辅助列：仅偏低点的数值
+_CHART_ANCHOR = "N2"
+
+
 def _trend_headers(lng: str) -> list[str]:
-    """趋势/批量导出统一的列：报告日期 | 检验项目 | 报告类型 | …"""
+    """趋势/批量导出统一的列（末两列是绘图辅助列，导出后自动隐藏）。"""
     return [tr(lng, "col.reportDate"), tr(lng, "col.testItem"), tr(lng, "col.reportType"),
             tr(lng, "col.value"), tr(lng, "col.valueNum"), tr(lng, "col.unit"),
             tr(lng, "col.refLow"), tr(lng, "col.refHigh"), tr(lng, "col.flag"),
-            tr(lng, "col.source")]
+            tr(lng, "col.source"), tr(lng, "col.highPoint"), tr(lng, "col.lowPoint")]
 
 
 def _append_trend_row(ws, r: dict, lng: str) -> None:
-    """写入一行趋势数据，并按异常标记整行着色。"""
+    """写入一行趋势数据，并按异常标记整行着色。辅助列供图表标记异常点。"""
+    flag = r.get("flag") or "normal"
+    num = r.get("value_num")
     ws.append([
         r.get("report_date") or "",
         r.get("item") or "",
         r.get("report_type") or "",
         r.get("value_text") or "",
-        r["value_num"] if r.get("value_num") is not None else "",
+        num if num is not None else "",
         r.get("unit") or "",
         r["ref_low"] if r.get("ref_low") is not None else "",
         r["ref_high"] if r.get("ref_high") is not None else "",
-        _flag_text(r.get("flag") or "normal", lng),
+        _flag_text(flag, lng),
         r.get("source_filename") or "",
+        num if (flag == "high" and num is not None) else "",
+        num if (flag == "low" and num is not None) else "",
     ])
-    fill = ABNORMAL_HIGH_FILL if r.get("flag") == "high" else (
-        ABNORMAL_LOW_FILL if r.get("flag") == "low" else None)
+    fill = ABNORMAL_HIGH_FILL if flag == "high" else (ABNORMAL_LOW_FILL if flag == "low" else None)
     if fill:
-        for cell in ws[ws.max_row]:
+        for cell in ws[ws.max_row][:10]:
             cell.fill = fill
+
+
+def _hide_aux_columns(ws) -> None:
+    for idx in (_COL_HIGH_PT, _COL_LOW_PT):
+        ws.column_dimensions[get_column_letter(idx)].hidden = True
+
+
+def _add_trend_chart(ws, title: str, unit: str = "") -> None:
+    """在数据右侧插入折线图：实测线 + 参考上下限虚线 + 异常点标记。
+
+    使用 Excel 原生图表（非图片），打开后可直接编辑，且随数据联动。
+    """
+    n = ws.max_row
+    if n < 2:
+        return
+    chart = LineChart()
+    chart.title = title
+    chart.height = 8.6
+    chart.width = 21
+
+    chart.add_data(Reference(ws, min_col=_COL_VALUE, min_row=1, max_row=n), titles_from_data=True)
+    chart.add_data(Reference(ws, min_col=_COL_REF_LOW, min_row=1, max_row=n), titles_from_data=True)
+    chart.add_data(Reference(ws, min_col=_COL_REF_HIGH, min_row=1, max_row=n), titles_from_data=True)
+    chart.add_data(Reference(ws, min_col=_COL_HIGH_PT, min_row=1, max_row=n), titles_from_data=True)
+    chart.add_data(Reference(ws, min_col=_COL_LOW_PT, min_row=1, max_row=n), titles_from_data=True)
+    chart.set_categories(Reference(ws, min_col=1, min_row=2, max_row=n))
+
+    # 实测线
+    s = chart.series[0]
+    s.graphicalProperties = GraphicalProperties()
+    s.graphicalProperties.line.solidFill = _C_LINE
+    s.graphicalProperties.line.width = 28575  # ≈2.25pt
+    s.smooth = True
+    s.marker = Marker(symbol="circle", size=5)
+    s.marker.graphicalProperties = GraphicalProperties(solidFill=_C_LINE)
+    s.marker.graphicalProperties.line.solidFill = _C_LINE
+
+    # 参考上下限：虚线、无标记
+    for idx in (1, 2):
+        r = chart.series[idx]
+        r.graphicalProperties = GraphicalProperties()
+        r.graphicalProperties.line.solidFill = _C_REF
+        r.graphicalProperties.line.dashStyle = "dash"
+        r.graphicalProperties.line.width = 12700
+        r.marker = Marker(symbol="none")
+
+    # 异常点：只画标记、不连线
+    for idx, color in ((3, _C_HIGH), (4, _C_LOW)):
+        a = chart.series[idx]
+        a.graphicalProperties = GraphicalProperties()
+        a.graphicalProperties.line.noFill = True
+        a.marker = Marker(symbol="circle", size=9)
+        a.marker.graphicalProperties = GraphicalProperties(solidFill=color)
+        a.marker.graphicalProperties.line.solidFill = color
+
+    if unit:
+        chart.y_axis.title = unit
+    chart.legend.position = "b"
+    chart.legend.overlay = False
+    ws.add_chart(chart, _CHART_ANCHOR)
 
 
 def _safe_sheet_name(name: str, used: set[str]) -> str:
@@ -176,9 +260,13 @@ def export_items_xlsx(patient_id: int, items: list[str], lang: Optional[str] = N
             _append_trend_row(ws, r, lng)
         _sheet_widths(ws, headers)
         _style_body(ws)
+        _hide_aux_columns(ws)
+        unit = next((r.get("unit") for r in series if r.get("unit")), "") or ""
+        _add_trend_chart(ws, f"{series[0].get('item') or raw} · {tr(lng, 'sheet.trend')}", unit)
 
     _sheet_widths(summary, headers)
     _style_body(summary)
+    _hide_aux_columns(summary)
     return _to_bytes(wb)
 
 

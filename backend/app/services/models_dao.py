@@ -279,6 +279,35 @@ def report_exists_by_md5(md5: str) -> Optional[int]:
         return row["id"] if row else None
 
 
+def _json_text(v) -> Optional[str]:
+    """把 dict/list 存成 JSON 文本；已是字符串或 None 时原样返回。"""
+    if v is None or isinstance(v, str):
+        return v
+    return json.dumps(v, ensure_ascii=False)
+
+
+def _insert_results(conn, report_id: int, items: list[dict]) -> None:
+    """写入检验结果行（含人工修改留痕与重解析待确认标记）。"""
+    from .template_store import normalize_text
+
+    for i, it in enumerate(items):
+        item = it.get("item", "") or ""
+        conn.execute(
+            "INSERT INTO results(report_id,item,item_norm,value_text,value_num,unit,ref_text,"
+            "ref_low,ref_high,flag,manual,manual_json,confirm_pending,recognized_json,seq,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                report_id, item, normalize_text(item),
+                it.get("value_text", "") or "", it.get("value_num"),
+                it.get("unit") or "", it.get("ref_text") or "",
+                it.get("ref_low"), it.get("ref_high"), it.get("flag", "normal") or "normal",
+                1 if it.get("manual") else 0, _json_text(it.get("manual_json")),
+                1 if it.get("confirm_pending") else 0, _json_text(it.get("recognized_json")),
+                i, _ts(),
+            ),
+        )
+
+
 def create_report(patient_id: int, task_id: Optional[int], batch_id: Optional[int],
                   source_filename: str, stored_path: str, md5: str,
                   meta: dict, raw_text: str, items: list[dict]) -> int:
@@ -296,20 +325,7 @@ def create_report(patient_id: int, task_id: Optional[int], batch_id: Optional[in
             ),
         )
         report_id = cur.lastrowid
-        from .template_store import normalize_text
-
-        for i, it in enumerate(items):
-            item = it.get("item", "") or ""
-            conn.execute(
-                "INSERT INTO results(report_id,item,item_norm,value_text,value_num,unit,ref_text,"
-                "ref_low,ref_high,flag,seq,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    report_id, item, normalize_text(item),
-                    it.get("value_text", "") or "", it.get("value_num"),
-                    it.get("unit") or "", it.get("ref_text") or "",
-                    it.get("ref_low"), it.get("ref_high"), it.get("flag", "normal") or "normal", i, _ts(),
-                ),
-            )
+        _insert_results(conn, report_id, items)
         return report_id
 
 
@@ -370,8 +386,6 @@ def delete_report(report_id: int) -> None:
 def replace_report_content(report_id: int, patient_id: Optional[int], meta: dict,
                            raw_text: str, items: list[dict]) -> None:
     """重解析后整体替换报告元信息与检验结果（保留 id/来源文件/创建时间）。"""
-    from .template_store import normalize_text
-
     with get_conn() as conn:
         conn.execute(
             "UPDATE reports SET patient_id=?, template_id=?, template_name=?, report_date=?,"
@@ -381,16 +395,70 @@ def replace_report_content(report_id: int, patient_id: Optional[int], meta: dict
              raw_text, report_id),
         )
         conn.execute("DELETE FROM results WHERE report_id=?", (report_id,))
-        for i, it in enumerate(items):
-            item = it.get("item", "") or ""
-            conn.execute(
-                "INSERT INTO results(report_id,item,item_norm,value_text,value_num,unit,ref_text,"
-                "ref_low,ref_high,flag,seq,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (report_id, item, normalize_text(item), it.get("value_text", "") or "",
-                 it.get("value_num"), it.get("unit") or "", it.get("ref_text") or "",
-                 it.get("ref_low"), it.get("ref_high"), it.get("flag", "normal") or "normal",
-                 i, _ts()),
-            )
+        _insert_results(conn, report_id, items)
+
+
+def list_pending_confirm() -> list[dict]:
+    """列出所有含"重解析待确认"检验行的报告（供待核对区块展示）。"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT r.id report_id, r.report_date, r.report_type, r.source_filename,"
+            " p.name patient_name, p.id patient_id,"
+            " (SELECT COUNT(*) FROM results s WHERE s.report_id=r.id AND s.confirm_pending=1) n"
+            " FROM reports r LEFT JOIN patients p ON p.id=r.patient_id"
+            " WHERE r.id IN (SELECT DISTINCT report_id FROM results WHERE confirm_pending=1)"
+            " ORDER BY r.report_date DESC, r.id DESC"
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            items = conn.execute(
+                "SELECT item, value_text, unit, flag, manual_json, recognized_json"
+                " FROM results WHERE report_id=? AND confirm_pending=1 ORDER BY seq",
+                (d["report_id"],),
+            ).fetchall()
+            d["items"] = [dict(x) for x in items]
+            out.append(d)
+        return out
+
+
+def resolve_pending_confirm(report_id: int, actions: dict[str, str]) -> int:
+    """处理重解析待确认项。actions: {item: 'keep'|'adopt'}；返回处理条数。
+
+    keep  —— 保留人工修改值，仅清除待确认标记；
+    adopt —— 采用本次重新识别的值（并取消人工标记）。
+    """
+    done = 0
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, item, manual_json, recognized_json FROM results"
+            " WHERE report_id=? AND confirm_pending=1", (report_id,)
+        ).fetchall()
+        for r in rows:
+            action = (actions or {}).get(r["item"], "keep")
+            if action == "adopt":
+                new_val = {}
+                if r["recognized_json"]:
+                    try:
+                        new_val = json.loads(r["recognized_json"]) or {}
+                    except (TypeError, ValueError):
+                        new_val = {}
+                conn.execute(
+                    "UPDATE results SET value_text=?, value_num=?, unit=?, ref_text=?, ref_low=?,"
+                    " ref_high=?, flag=?, manual=0, manual_json=NULL, confirm_pending=0,"
+                    " recognized_json=NULL WHERE id=?",
+                    (new_val.get("value_text") or "", new_val.get("value_num"),
+                     new_val.get("unit") or "", new_val.get("ref_text") or "",
+                     new_val.get("ref_low"), new_val.get("ref_high"),
+                     new_val.get("flag") or "normal", r["id"]),
+                )
+            else:
+                conn.execute(
+                    "UPDATE results SET confirm_pending=0, recognized_json=NULL WHERE id=?",
+                    (r["id"],),
+                )
+            done += 1
+    return done
 
 
 # ---------------------------------------------------------------------------

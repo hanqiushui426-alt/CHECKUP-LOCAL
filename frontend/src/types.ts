@@ -1,4 +1,5 @@
 export interface ResultItem {
+  id?: number;
   item: string;
   value_text: string;
   value_num: number | null;
@@ -6,7 +7,34 @@ export interface ResultItem {
   ref_text: string;
   ref_low: number | null;
   ref_high: number | null;
-  flag: "high" | "low" | "normal";
+  /** "auto" 仅存在于表单编辑态：表示交给参考范围自动判断 */
+  flag: "high" | "low" | "normal" | "auto" | string;
+  /** 该行是否被人工修改过（重解析时不会被直接覆盖） */
+  manual?: number;
+  manual_json?: string | null;
+  /** 1 = 重解析后发现与人工值不同，等待人工确认 */
+  confirm_pending?: number;
+  /** 本次重新识别得到的值（JSON 字符串），供对比/采用 */
+  recognized_json?: string | null;
+}
+
+/** 重解析待确认的报告 */
+export interface PendingConfirm {
+  report_id: number;
+  patient_id?: number | null;
+  patient_name?: string | null;
+  report_date?: string | null;
+  report_type?: string | null;
+  source_filename?: string;
+  n: number;
+  items: Array<{
+    item: string;
+    value_text: string;
+    unit?: string | null;
+    flag: string;
+    manual_json?: string | null;
+    recognized_json?: string | null;
+  }>;
 }
 
 export interface Candidate {
