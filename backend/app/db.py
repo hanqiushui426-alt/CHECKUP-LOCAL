@@ -127,6 +127,14 @@ CREATE TABLE IF NOT EXISTS review_items (
 );
 CREATE INDEX IF NOT EXISTS idx_review_status ON review_items(status);
 
+CREATE TABLE IF NOT EXISTS export_presets (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    items_json TEXT NOT NULL,          -- 常用导出项目组（项目名数组）
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS activity_log (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     ts     TEXT NOT NULL,

@@ -18,6 +18,15 @@ export interface ResultItem {
   recognized_json?: string | null;
 }
 
+/** 常用导出项目组 */
+export interface ExportPreset {
+  id: number;
+  name: string;
+  items: string[];
+  created_at?: string;
+  updated_at?: string;
+}
+
 /** 重解析待确认的报告 */
 export interface PendingConfirm {
   report_id: number;

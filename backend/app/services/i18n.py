@@ -64,6 +64,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "col.lowPoint": "偏低点（绘图辅助）",
         "sheet.summary": "全部明细",
         "export.noItems": "请至少选择一个检验项目",
+        "preset.needName": "请填写项目组名称",
+        "preset.needItems": "请至少勾选一个检验项目",
+        "preset.notFound": "项目组不存在",
     },
     "en-US": {
         "report.notFound": "Report not found",
@@ -117,6 +120,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "col.lowPoint": "Low points (chart helper)",
         "sheet.summary": "All details",
         "export.noItems": "Select at least one test item",
+        "preset.needName": "Please name this group",
+        "preset.needItems": "Select at least one test item",
+        "preset.notFound": "Group not found",
     },
 }
 

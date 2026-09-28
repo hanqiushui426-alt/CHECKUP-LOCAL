@@ -1,5 +1,6 @@
 import { Route, Routes } from "react-router-dom";
 import Layout from "./components/layout";
+import { DirectoryProvider } from "./components/directory";
 import { ToastHost } from "./components/ui";
 import Dashboard from "./pages/Dashboard";
 import ImportPage from "./pages/Import";
@@ -12,7 +13,7 @@ export default function App() {
     <>
       <ToastHost />
       <Routes>
-        <Route element={<Layout />}>
+        <Route element={<DirectoryProvider><Layout /></DirectoryProvider>}>
           <Route path="/" element={<Dashboard />} />
           <Route path="/import" element={<ImportPage />} />
           <Route path="/patients" element={<PatientsPage />} />

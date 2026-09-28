@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { ArrowLeft, Calendar, FileText, Pencil, Plus, RefreshCw, Search, Trash2, UserRound, Users } from "lucide-react";
+import { FileText, Pencil, RefreshCw, Trash2, Users } from "lucide-react";
 import { api, notify, toastError } from "../api";
 import { Badge, Card, ConfirmDialog, Empty, Modal, Spinner, cn, useAppRefresh } from "../components/ui";
 import ReportEditor from "../components/ReportEditor";
+import { useDirectory } from "../components/directory";
 import { useI18n } from "../i18n";
 import type { Patient, PendingConfirm, Report, ReviewSummary } from "../types";
 
@@ -18,13 +19,11 @@ type ConfirmKind =
 
 export default function PatientsPage() {
   const { t } = useI18n();
-  const [q, setQ] = useState("");
-  const [list, setList] = useState<Patient[]>([]);
-  const [total, setTotal] = useState(0);
-  const [sel, setSel] = useState<Patient | null>(null);
+  const dir = useDirectory();
+  const [draft, setDraft] = useState<Patient | null>(null);
   const [reports, setReports] = useState<Report[]>([]);
   const [dups, setDups] = useState<Patient[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [openReports, setOpenReports] = useState<Record<number, ReportDetail | null>>({});
   const [confirm, setConfirm] = useState<ConfirmKind>(null);
   const [withReports, setWithReports] = useState(true);
@@ -37,97 +36,89 @@ export default function PatientsPage() {
   const [sp, setSp] = useSearchParams();
   const jumpHandled = useRef(false);
 
-  // 从「趋势分析」跳转进来：/patients?patient=1&report=2&item=白细胞计数
-  // 自动选中患者、打开该报告编辑器并定位到该项目
+  // 侧栏「新建患者」按钮 → 打开弹窗
   useEffect(() => {
-    if (jumpHandled.current || loading || !list.length) return;
-    const pid = Number(sp.get("patient") || 0);
-    if (!pid) return;
-    jumpHandled.current = true;
-    const rid = Number(sp.get("report") || 0);
-    const focus = sp.get("item") || undefined;
-    const next = new URLSearchParams(sp);
-    next.delete("patient"); next.delete("report"); next.delete("item");
-    setSp(next, { replace: true });
-    const p = list.find((x) => x.id === pid);
-    if (p) {
-      open(p, list)
-        .then(() => { if (rid) setEditor({ mode: "report", id: rid, focusItem: focus }); })
-        .catch(toastError);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [list, loading, sp, setSp]);
+    dir.newPatientRef.current = () => setCreating({ name: "", gender: "", birth_date: "", note: "" });
+    return () => { dir.newPatientRef.current = null; };
+  }, [dir]);
 
   const loadPending = useCallback(async () => {
     const r = await api.get<{ items: ReviewSummary[] }>("/api/review?status=pending&limit=200");
     setPending(r.items);
   }, []);
 
-  // 已入库报告中"人工改过、又被重新识别"的待确认项
   const loadPendingConfirm = useCallback(async () => {
     const r = await api.get<{ items: PendingConfirm[] }>("/api/reports/pending-confirm");
     setPendingConfirm(r.items);
   }, []);
 
-  /** 打开某份报告并定位（用于待确认项跳转） */
-  async function openReportForConfirm(pid: number | null | undefined, rid: number, item?: string) {
-    const p = list.find((x) => x.id === pid);
-    if (p) await open(p, list);
-    setEditor({ mode: "report", id: rid, focusItem: item });
-  }
+  // 当前选中的患者（由左侧目录驱动）
+  const sel = dir.patientId ? (dir.patients.find((p) => p.id === dir.patientId) || null) : null;
+
+  useEffect(() => {
+    const p = dir.patientId ? (dir.patients.find((x) => x.id === dir.patientId) || null) : null;
+    setOpenReports({});
+    setDraft(p ? { ...p } : null);
+    setDups(p ? dir.patients.filter((d) => d.id !== p.id && nameSimilar(d.name, p.name)) : []);
+    if (!p) { setReports([]); return; }
+    setLoading(true);
+    api.get<{ items: Report[] }>(`/api/patients/${p.id}/reports?limit=500`)
+      .then((r) => setReports(r.items))
+      .catch(toastError)
+      .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dir.patientId]);
+
+  useEffect(() => {
+    loadPending().catch(() => {});
+    loadPendingConfirm().catch(() => {});
+  }, [loadPending, loadPendingConfirm]);
+
+  useAppRefresh(() => {
+    dir.reloadPatients().catch(() => {});
+    loadPending().catch(() => {});
+    loadPendingConfirm().catch(() => {});
+  });
+
+  // 从「趋势分析」跳转进来：/patients?patient=1&report=2&item=白细胞计数
+  useEffect(() => {
+    if (jumpHandled.current || !dir.patients.length) return;
+    const pid = Number(sp.get("patient") || 0);
+    if (!pid) return;
+    jumpHandled.current = true;
+    const rid = Number(sp.get("report") || 0);
+    const focus = sp.get("item") || undefined;
+    const next = new URLSearchParams(sp);
+    ["patient", "report", "item"].forEach((k) => next.delete(k));
+    setSp(next, { replace: true });
+    const p = dir.patients.find((x) => x.id === pid);
+    if (p) dir.selectPatient(p);
+    if (rid) setEditor({ mode: "report", id: rid, focusItem: focus });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dir.patients, sp, setSp]);
 
   async function onEditorSaved() {
     setEditor(null);
     await loadPending().catch(() => {});
     await loadPendingConfirm().catch(() => {});
-    const all = await load();
-    if (sel) await open(sel, all);
-  }
-
-  const load = useCallback(async (kw?: string) => {
-    const r = await api.get<{ items: Patient[]; total: number }>(`/api/patients?q=${encodeURIComponent(kw || "")}&limit=1000`);
-    setList(r.items); setTotal(r.total);
-    return r.items;
-  }, []);
-
-  useEffect(() => {
-    load().catch(toastError).finally(() => setLoading(false));
-    loadPending().catch(() => {});
-    loadPendingConfirm().catch(() => {});
-  }, [load, loadPending, loadPendingConfirm]);
-
-  // 切换左侧栏目时自动刷新
-  useAppRefresh(() => {
-    load().catch(() => {});
-    loadPending().catch(() => {});
-    loadPendingConfirm().catch(() => {});
-  });
-
-  async function open(p: Patient, all: Patient[] = list) {
-    setSel(p);
-    setReports([]);
-    setOpenReports({});
-    setDups(all.filter((d) => d.id !== p.id && nameSimilar(d.name, p.name)));
-    setLoading(true);
-    try {
-      const rp = await api.get<{ items: Report[] }>(`/api/patients/${p.id}/reports?limit=500`);
-      setReports(rp.items);
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setLoading(false);
+    await dir.reloadPatients().catch(() => {});
+    if (dir.patientId) {
+      const rp = await api.get<{ items: Report[] }>(`/api/patients/${dir.patientId}/reports?limit=500`)
+        .catch(() => null);
+      if (rp) setReports(rp.items);
     }
   }
 
   async function savePatient() {
-    if (!sel) return;
+    if (!draft) return;
     setBusy(true);
     try {
-      await api.put(`/api/patients/${sel.id}`, {
-        name: sel.name, gender: sel.gender || "", birth_date: sel.birth_date || "", note: sel.note || "",
+      await api.put(`/api/patients/${draft.id}`, {
+        name: draft.name, gender: draft.gender || "", birth_date: draft.birth_date || "",
+        note: draft.note || "",
       });
       notify(t("patients.savedProfile"), "success");
-      await load();
+      await dir.reloadPatients();
     } catch (e) {
       toastError(e);
     } finally {
@@ -146,8 +137,8 @@ export default function PatientsPage() {
       });
       notify(t("patients.created"), "success");
       setCreating(null);
-      const all = await load();
-      await open(p, all);
+      await dir.reloadPatients();
+      dir.selectPatient(p);
     } catch (e) {
       toastError(e);
     } finally {
@@ -161,8 +152,10 @@ export default function PatientsPage() {
     try {
       await api.del(`/api/patients/${sel.id}?with_reports=${withReports ? "true" : "false"}`);
       notify(withReports ? t("patients.deletedWithReports") : t("patients.deletedKeepReports"), "success");
-      setConfirm(null); setSel(null); setReports([]);
-      await load();
+      setConfirm(null);
+      dir.selectPatient(null);
+      setReports([]);
+      await dir.reloadPatients();
     } catch (e) {
       toastError(e);
     } finally {
@@ -176,7 +169,11 @@ export default function PatientsPage() {
       await api.del(`/api/reports/${r.id}`);
       notify(t("patients.reportDeleted"), "info");
       setConfirm(null);
-      if (sel) await open(sel);
+      if (dir.patientId) {
+        const rp = await api.get<{ items: Report[] }>(`/api/patients/${dir.patientId}/reports?limit=500`);
+        setReports(rp.items);
+      }
+      await dir.reloadPatients();
     } catch (e) {
       toastError(e);
     } finally {
@@ -189,8 +186,12 @@ export default function PatientsPage() {
     try {
       await api.post(`/api/reports/${r.id}/reparse`, {});
       notify(t("patients.reparsed"), "success");
-      if (sel) await open(sel);
-      await load();
+      if (dir.patientId) {
+        const rp = await api.get<{ items: Report[] }>(`/api/patients/${dir.patientId}/reports?limit=500`);
+        setReports(rp.items);
+      }
+      await dir.reloadPatients();
+      await loadPendingConfirm().catch(() => {});
     } catch (e) {
       toastError(e);
     } finally {
@@ -203,8 +204,9 @@ export default function PatientsPage() {
     try {
       const r = await api.post<{ total: number; ok: number; failed: any[] }>("/api/reports/reparse-all", {});
       notify(t("patients.reparseAllDone", { ok: r.ok, failed: r.failed.length }), r.failed.length ? "error" : "success");
-      setSel(null);
-      await load();
+      dir.selectPatient(null);
+      await dir.reloadPatients();
+      await loadPendingConfirm().catch(() => {});
     } catch (e) {
       toastError(e);
     } finally {
@@ -218,8 +220,8 @@ export default function PatientsPage() {
     try {
       await api.post(`/api/patients/${sel.id}/merge`, { remove_id: other.id });
       notify(t("patients.merged"), "success");
-      const all = await load();
-      await open(sel, all);
+      await dir.reloadPatients();
+      setDups([]);
     } catch (e) {
       toastError(e);
     } finally {
@@ -227,173 +229,159 @@ export default function PatientsPage() {
     }
   }
 
+  function toggleReport(r: Report) {
+    if (openReports[r.id]) {
+      const nx = { ...openReports };
+      delete nx[r.id];
+      setOpenReports(nx);
+      return;
+    }
+    api.get<ReportDetail>(`/api/reports/${r.id}`)
+      .then((d) => setOpenReports((prev) => ({ ...prev, [r.id]: d })))
+      .catch(toastError);
+  }
+
+  async function openReportForConfirm(pid: number | null | undefined, rid: number, item?: string) {
+    const p = dir.patients.find((x) => x.id === pid);
+    if (p) dir.selectPatient(p);
+    setEditor({ mode: "report", id: rid, focusItem: item });
+  }
+
   return (
-    <div className="grid lg:grid-cols-[340px,1fr] gap-5 items-start">
-      <Card title={t("patients.title", { n: total })} className="lg:sticky lg:top-20 flex flex-col max-h-[calc(100vh-140px)]"
-        extra={<button className="btn-ghost !py-1 !px-2 text-xs" onClick={() =>
-          setCreating({ name: "", gender: "", birth_date: "", note: "" })}>
-          <Plus className="w-3.5 h-3.5" />{t("patients.new")}</button>}>
-        <div className="relative mb-3">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
-          <input className="input !pl-9" placeholder={t("patients.search")} value={q}
-            onChange={(e) => { setQ(e.target.value); load(e.target.value).catch(() => {}); }} />
-        </div>
-        <div className="flex-1 overflow-y-auto space-y-2 -mr-1 pr-1">
-          {loading && !sel && <Spinner />}
-          {!loading && list.length === 0 && <Empty text={t("patients.empty")} />}
-          {list.map((p) => (
-            <button key={p.id} onClick={() => open(p)}
-              className={cn("w-full text-left rounded-xl border px-3.5 py-3 transition cursor-pointer",
-                sel?.id === p.id ? "border-primary-400 bg-primary-50/60" : "border-slate-100 hover:border-slate-200 bg-white")}>
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-ink flex items-center gap-2"><UserRound className="w-4 h-4 text-primary-600" />{p.name}</span>
-                <Badge tone="teal">{p.report_count} {t("patients.reportsUnit")}</Badge>
+    <div className="space-y-5">
+      <Card title={t("patients.pendingTitle", { n: pending.length + pendingConfirm.length })}
+        extra={<Badge tone={(pending.length + pendingConfirm.length) ? "amber" : "green"}>
+          {(pending.length + pendingConfirm.length) ? t("patients.pendingNeed") : t("patients.pendingNone")}</Badge>}>
+        {pending.length === 0 && pendingConfirm.length === 0 ? (
+          <div className="text-xs text-ink-faint py-1">
+            {t("patients.pendingEmpty")}
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {pending.map((p) => (
+              <button key={p.id} onClick={() => setEditor({ mode: "review", id: p.id })}
+                className="w-full flex items-center justify-between gap-3 rounded-xl border border-amber-100 bg-amber-50/40 px-4 py-3 hover:bg-amber-50 text-left cursor-pointer">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-ink truncate">
+                    {p.patient_name || t("patients.unknownName")} · {p.filename}
+                  </div>
+                  <div className="text-xs text-ink-faint mt-0.5">
+                    {p.report_date || t("patients.noDate")} · {p.report_type || p.template_name || t("patients.noTemplate")} · {t("patients.confidence", { p: Math.round((p.confidence || 0) * 100) })}
+                  </div>
+                </div>
+                <Badge tone="amber">{t("patients.goReview")}</Badge>
+              </button>
+            ))}
+
+            {pendingConfirm.length > 0 && (
+              <div className={cn("space-y-2", pending.length > 0 && "pt-2.5 mt-1 border-t border-amber-100")}>
+                <div className="text-xs font-medium text-amber-700">
+                  {t("patients.confirmTitle", { n: pendingConfirm.length })}
+                </div>
+                {pendingConfirm.map((p) => (
+                  <button key={p.report_id}
+                    onClick={() => openReportForConfirm(p.patient_id, p.report_id, p.items[0]?.item)}
+                    className="w-full flex items-center justify-between gap-3 rounded-xl border border-amber-100 bg-white px-4 py-3 hover:bg-amber-50 text-left cursor-pointer">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-ink truncate">
+                        {p.patient_name || t("patients.unknownName")} · {p.source_filename}
+                      </div>
+                      <div className="text-xs text-ink-faint mt-0.5">
+                        {p.report_date || t("patients.noDate")} · {p.report_type || "—"} · {t("patients.confirmCount", { n: p.n })}
+                      </div>
+                    </div>
+                    <Badge tone="amber">{t("patients.goConfirm")}</Badge>
+                  </button>
+                ))}
               </div>
-              <div className="text-xs text-ink-faint mt-1.5 flex items-center gap-3">
-                <span>{p.gender || "—"} {p.birth_date ? "· " + p.birth_date : ""}</span>
-                {p.last_date && <span className="flex items-center gap-1"><Calendar className="w-3 h-3" />{p.last_date}</span>}
-              </div>
-            </button>
-          ))}
-        </div>
+            )}
+          </div>
+        )}
       </Card>
 
-      <div className="space-y-5">
-        <Card title={t("patients.pendingTitle", { n: pending.length + pendingConfirm.length })}
-          extra={<Badge tone={(pending.length + pendingConfirm.length) ? "amber" : "green"}>
-            {(pending.length + pendingConfirm.length) ? t("patients.pendingNeed") : t("patients.pendingNone")}</Badge>}>
-          {pending.length === 0 && pendingConfirm.length === 0 ? (
-            <div className="text-xs text-ink-faint py-1">
-              {t("patients.pendingEmpty")}
+      {!sel || !draft ? (
+        <Card><Empty text={t("patients.selectHint")} /></Card>
+      ) : (
+        <>
+          <Card title={t("patients.profile")} extra={
+            <div className="flex gap-2">
+              <button className="btn-danger !py-1.5" onClick={() => setConfirm({ kind: "delete-patient" })}>
+                <Trash2 className="w-3.5 h-3.5" />{t("common.delete")}</button>
+            </div>}>
+            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <EditField label={t("patients.name")}><input className="input" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></EditField>
+              <EditField label={t("patients.gender")}>
+                <select className="input" value={draft.gender || ""} onChange={(e) => setDraft({ ...draft, gender: e.target.value || null })}>
+                  <option value="">{t("patients.unknown")}</option><option>{t("patients.male")}</option><option>{t("patients.female")}</option>
+                </select>
+              </EditField>
+              <EditField label={t("patients.birthDate")}><input className="input" type="date" value={draft.birth_date || ""} onChange={(e) => setDraft({ ...draft, birth_date: e.target.value || null })} /></EditField>
+              <EditField label={t("patients.note")}><input className="input" value={draft.note || ""} onChange={(e) => setDraft({ ...draft, note: e.target.value })} /></EditField>
             </div>
-          ) : (
-            <div className="space-y-2">
-              {pending.map((p) => (
-                <button key={p.id} onClick={() => setEditor({ mode: "review", id: p.id })}
-                  className="w-full flex items-center justify-between gap-3 rounded-xl border border-amber-100 bg-amber-50/40 px-4 py-3 hover:bg-amber-50 text-left cursor-pointer">
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium text-ink truncate">
-                      {p.patient_name || t("patients.unknownName")} · {p.filename}
+            <button className="btn-primary mt-4" onClick={savePatient} disabled={busy}>{busy ? t("patients.processing") : t("patients.saveProfile")}</button>
+            {dups.length > 0 && (
+              <div className="mt-4 rounded-xl bg-amber-50 border border-amber-100 p-3 text-sm">
+                <div className="text-amber-700 font-medium mb-2">{t("patients.dupHint")}</div>
+                <div className="space-y-1.5">
+                  {dups.map((d) => (
+                    <div key={d.id} className="flex items-center justify-between text-amber-800">
+                      <span>{d.name}（{d.report_count ?? 0} {t("patients.reportsUnit")}，#{d.id}）</span>
+                      <button className="text-primary-700 text-xs underline cursor-pointer" onClick={() => mergeFrom(d)}>{t("patients.mergeInto")}</button>
                     </div>
-                    <div className="text-xs text-ink-faint mt-0.5">
-                      {p.report_date || t("patients.noDate")} · {p.report_type || p.template_name || t("patients.noTemplate")} · {t("patients.confidence", { p: Math.round((p.confidence || 0) * 100) })}
-                    </div>
-                  </div>
-                  <Badge tone="amber">{t("patients.goReview")}</Badge>
-                </button>
-              ))}
-
-              {pendingConfirm.length > 0 && (
-                <div className={cn("space-y-2", pending.length > 0 && "pt-2.5 mt-1 border-t border-amber-100")}>
-                  <div className="text-xs font-medium text-amber-700">
-                    {t("patients.confirmTitle", { n: pendingConfirm.length })}
-                  </div>
-                  {pendingConfirm.map((p) => (
-                    <button key={p.report_id}
-                      onClick={() => openReportForConfirm(p.patient_id, p.report_id, p.items[0]?.item)}
-                      className="w-full flex items-center justify-between gap-3 rounded-xl border border-amber-100 bg-white px-4 py-3 hover:bg-amber-50 text-left cursor-pointer">
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium text-ink truncate">
-                          {p.patient_name || t("patients.unknownName")} · {p.source_filename}
-                        </div>
-                        <div className="text-xs text-ink-faint mt-0.5">
-                          {p.report_date || t("patients.noDate")} · {p.report_type || "—"} · {t("patients.confirmCount", { n: p.n })}
-                        </div>
-                      </div>
-                      <Badge tone="amber">{t("patients.goConfirm")}</Badge>
-                    </button>
                   ))}
                 </div>
-              )}
-            </div>
-          )}
-        </Card>
-
-        {!sel ? (
-          <Card><Empty text={t("patients.selectHint")} /></Card>
-        ) : (
-          <>
-            <Card title={t("patients.profile")} extra={
-              <div className="flex gap-2">
-                <button className="btn-ghost !py-1.5" onClick={() => { setSel(null); setReports([]); }}><ArrowLeft className="w-3.5 h-3.5" />{t("patients.back")}</button>
-                <button className="btn-danger !py-1.5" onClick={() => setConfirm({ kind: "delete-patient" })}>
-                  <Trash2 className="w-3.5 h-3.5" />{t("common.delete")}</button>
-              </div>}>
-              <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                <EditField label={t("patients.name")}><input className="input" value={sel.name} onChange={(e) => setSel({ ...sel, name: e.target.value })} /></EditField>
-                <EditField label={t("patients.gender")}>
-                  <select className="input" value={sel.gender || ""} onChange={(e) => setSel({ ...sel, gender: e.target.value || null })}>
-                    <option value="">{t("patients.unknown")}</option><option>{t("patients.male")}</option><option>{t("patients.female")}</option>
-                  </select>
-                </EditField>
-                <EditField label={t("patients.birthDate")}><input className="input" type="date" value={sel.birth_date || ""} onChange={(e) => setSel({ ...sel, birth_date: e.target.value || null })} /></EditField>
-                <EditField label={t("patients.note")}><input className="input" value={sel.note || ""} onChange={(e) => setSel({ ...sel, note: e.target.value })} /></EditField>
               </div>
-              <button className="btn-primary mt-4" onClick={savePatient} disabled={busy}>{busy ? t("patients.processing") : t("patients.saveProfile")}</button>
-              {dups.length > 0 && (
-                <div className="mt-4 rounded-xl bg-amber-50 border border-amber-100 p-3 text-sm">
-                  <div className="text-amber-700 font-medium mb-2">{t("patients.dupHint")}</div>
-                  <div className="space-y-1.5">
-                    {dups.map((d) => (
-                      <div key={d.id} className="flex items-center justify-between text-amber-800">
-                        <span>{d.name}（{d.report_count ?? 0} {t("patients.reportsUnit")}，#{d.id}）</span>
-                        <button className="text-primary-700 text-xs underline cursor-pointer" onClick={() => mergeFrom(d)}>{t("patients.mergeInto")}</button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </Card>
+            )}
+          </Card>
 
-            <Card title={t("patients.reportsTitle", { n: reports.length })} extra={
-              <div className="flex items-center gap-2">
-                <button className="btn-ghost !py-1 !px-2 text-xs" onClick={reparseAll} disabled={busy}
-                  title={t("patients.reparseAllTip")}>
-                  <RefreshCw className="w-3.5 h-3.5" />{t("patients.reparseAll")}</button>
-                <Badge tone="blue"><Users className="w-3 h-3 mr-1" />{t("patients.localOnly")}</Badge>
-              </div>}>
-              {loading && reports.length === 0 ? <Spinner /> : reports.length === 0 ? (
-                <Empty text={t("patients.noReport")} />
-              ) : (
-                <div className="space-y-2.5">
-                  {reports.map((r) => (
-                    <div key={r.id} className="rounded-xl border border-slate-100 overflow-hidden">
-                      <div className="flex items-center gap-2 bg-white">
-                        <button className="flex-1 flex items-center gap-3 px-4 py-3 hover:bg-slate-50/60 text-left cursor-pointer"
-                          onClick={() => toggleReport(r, openReports, setOpenReports)}>
-                          <FileText className="w-4 h-4 text-primary-500 shrink-0" />
-                          <span className="font-medium text-ink text-sm">{r.report_date || "未知日期"} · {r.report_type || "检验"}</span>
-                          <span className="text-xs text-ink-faint truncate flex-1">{r.hospital || ""} {r.template_name ? "· " + r.template_name : ""}</span>
-                          <Badge tone="teal">{r.result_count} 项</Badge>
+          <Card title={t("patients.reportsTitle", { n: reports.length })} extra={
+            <div className="flex items-center gap-2">
+              <button className="btn-ghost !py-1 !px-2 text-xs" onClick={reparseAll} disabled={busy}
+                title={t("patients.reparseAllTip")}>
+                <RefreshCw className="w-3.5 h-3.5" />{t("patients.reparseAll")}</button>
+              <Badge tone="blue"><Users className="w-3 h-3 mr-1" />{t("patients.localOnly")}</Badge>
+            </div>}>
+            {loading && reports.length === 0 ? <Spinner /> : reports.length === 0 ? (
+              <Empty text={t("patients.noReport")} />
+            ) : (
+              <div className="space-y-2.5">
+                {reports.map((r) => (
+                  <div key={r.id} className="rounded-xl border border-slate-100 overflow-hidden">
+                    <div className="flex items-center gap-2 bg-white">
+                      <button className="flex-1 flex items-center gap-3 px-4 py-3 hover:bg-slate-50/60 text-left cursor-pointer"
+                        onClick={() => toggleReport(r)}>
+                        <FileText className="w-4 h-4 text-primary-500 shrink-0" />
+                        <span className="font-medium text-ink text-sm">{r.report_date || t("patients.unknownDate")} · {r.report_type || "检验"}</span>
+                        <span className="text-xs text-ink-faint truncate flex-1">{r.hospital || ""} {r.template_name ? "· " + r.template_name : ""}</span>
+                        <Badge tone="teal">{r.result_count} 项</Badge>
+                      </button>
+                      <div className="flex items-center gap-1 pr-2 shrink-0">
+                        <button className="p-1.5 text-slate-300 hover:text-primary-600 cursor-pointer" title={t("patients.editReport")}
+                          onClick={() => setEditor({ mode: "report", id: r.id })}>
+                          <Pencil className="w-4 h-4" />
                         </button>
-                        <div className="flex items-center gap-1 pr-2 shrink-0">
-                          <button className="p-1.5 text-slate-300 hover:text-primary-600 cursor-pointer" title={t("patients.editReport")}
-                            onClick={() => setEditor({ mode: "report", id: r.id })}>
-                            <Pencil className="w-4 h-4" />
-                          </button>
-                          <button className="p-1.5 text-slate-300 hover:text-primary-600 cursor-pointer" title={t("patients.reparse")}
-                            disabled={busyReport === r.id}
-                            onClick={() => reparseReport(r)}>
-                            <RefreshCw className={cn("w-4 h-4", busyReport === r.id && "animate-spin")} />
-                          </button>
-                          <button className="p-1.5 text-slate-300 hover:text-danger cursor-pointer" title={t("patients.deleteReport")}
-                            onClick={() => setConfirm({ kind: "delete-report", report: r })}>
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
+                        <button className="p-1.5 text-slate-300 hover:text-primary-600 cursor-pointer" title={t("patients.reparse")}
+                          disabled={busyReport === r.id}
+                          onClick={() => reparseReport(r)}>
+                          <RefreshCw className={cn("w-4 h-4", busyReport === r.id && "animate-spin")} />
+                        </button>
+                        <button className="p-1.5 text-slate-300 hover:text-danger cursor-pointer" title={t("patients.deleteReport")}
+                          onClick={() => setConfirm({ kind: "delete-report", report: r })}>
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </div>
-                      {openReports[r.id] && (
-                        <ReportItems report={openReports[r.id]}
-                          onEditItem={(item) => setEditor({ mode: "report", id: r.id, focusItem: item })} />
-                      )}
                     </div>
-                  ))}
-                </div>
-              )}
-            </Card>
-          </>
-        )}
-      </div>
+                    {openReports[r.id] && (
+                      <ReportItems report={openReports[r.id]}
+                        onEditItem={(item) => setEditor({ mode: "report", id: r.id, focusItem: item })} />
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        </>
+      )}
 
       {editor && (
         <ReportEditor mode={editor.mode} id={editor.id} focusItem={editor.focusItem}
@@ -443,11 +431,6 @@ export default function PatientsPage() {
       )}
     </div>
   );
-
-  function toggleReport(r: Report, state: any, set: any) {
-    if (state[r.id]) { const nx = { ...state }; delete nx[r.id]; set(nx); return; }
-    api.get<ReportDetail>(`/api/reports/${r.id}`).then((d) => set({ ...state, [r.id]: d })).catch(toastError);
-  }
 }
 
 function EditField({ label, children }: { label: string; children: React.ReactNode }) {

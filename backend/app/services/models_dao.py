@@ -279,6 +279,55 @@ def report_exists_by_md5(md5: str) -> Optional[int]:
         return row["id"] if row else None
 
 
+def list_export_presets() -> list[dict]:
+    """常用导出项目组列表（按更新时间倒序）。"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM export_presets ORDER BY updated_at DESC, id DESC").fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["items"] = json.loads(d.pop("items_json") or "[]")
+        except (TypeError, ValueError):
+            d["items"] = []
+        out.append(d)
+    return out
+
+
+def create_export_preset(name: str, items: list[str]) -> dict:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO export_presets(name,items_json,created_at,updated_at) VALUES(?,?,?,?)",
+            (name, json.dumps(items, ensure_ascii=False), _ts(), _ts()),
+        )
+        preset_id = cur.lastrowid
+    return next((p for p in list_export_presets() if p["id"] == preset_id), {})
+
+
+def update_export_preset(preset_id: int, name: Optional[str] = None,
+                         items: Optional[list[str]] = None) -> bool:
+    fields, params = [], []
+    if name is not None:
+        fields.append("name=?")
+        params.append(name)
+    if items is not None:
+        fields.append("items_json=?")
+        params.append(json.dumps(items, ensure_ascii=False))
+    if not fields:
+        return False
+    fields.append("updated_at=?")
+    params.extend([_ts(), preset_id])
+    with get_conn() as conn:
+        cur = conn.execute(f"UPDATE export_presets SET {','.join(fields)} WHERE id=?", params)
+        return bool(cur.rowcount)
+
+
+def delete_export_preset(preset_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM export_presets WHERE id=?", (preset_id,))
+
+
 def _json_text(v) -> Optional[str]:
     """把 dict/list 存成 JSON 文本；已是字符串或 None 时原样返回。"""
     if v is None or isinstance(v, str):
