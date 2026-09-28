@@ -1,0 +1,26 @@
+{
+  "id": "builtin_screening",
+  "name": "新生儿筛查报告（G6PD 等）",
+  "category": "table",
+  "report_type": "筛查检验",
+  "match": {
+    "text_contains": ["筛查报告"],
+    "exclude": []
+  },
+  "patient": {
+    "name_regex": "(?:患者|婴儿|病人)?姓名\\s*[:：]?\\s*([\\u4e00-\\u9fa5A-Za-z·•]{2,12})",
+    "gender_regex": "(?:婴儿)?性别\\s*[:：]?\\s*([男女])",
+    "birth_regex": "(?:出生日期|出生年月|出生时间|生日|DOB)\\s*[:：]?\\s*((?:19|20)\\d{2})[年./\\-](\\d{1,2})[月./\\-](\\d{1,2})日?",
+    "date_regex": "((?:19|20)\\d{2})\\s*[年./\\-]\\s*(\\d{1,2})\\s*[月./\\-]\\s*(\\d{1,2})\\s*日?"
+  },
+  "items": {
+    "mode": "table",
+    "columns": [
+      { "key": "item", "aliases": ["实验项目", "项目名称", "检验项目", "检查项目", "项目"] },
+      { "key": "value", "aliases": ["结果", "测定结果", "检验结果"] },
+      { "key": "unit", "aliases": ["单位"] },
+      { "key": "ref", "aliases": ["参考值", "参考区间", "参考范围", "参考"] },
+      { "key": "extra", "aliases": ["备注", "实验日期", "打印日期"] }
+    ]
+  }
+}

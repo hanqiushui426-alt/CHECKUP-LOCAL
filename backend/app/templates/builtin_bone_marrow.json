@@ -1,0 +1,19 @@
+{
+  "id": "builtin_bone_marrow",
+  "name": "骨髓细胞学分析报告（文字描述型）",
+  "category": "text",
+  "report_type": "骨髓细胞学",
+  "match": {
+    "text_contains": ["骨髓"],
+    "exclude": []
+  },
+  "patient": {
+    "name_regex": "(?:患者)?姓名\\s*[:：]?\\s*([\\u4e00-\\u9fa5A-Za-z·•]{2,12})",
+    "gender_regex": "性别\\s*[:：]?\\s*([男女])",
+    "birth_regex": "(?:出生日期|出生年月|出生时间|生日|DOB)\\s*[:：]?\\s*((?:19|20)\\d{2})[年./\\-](\\d{1,2})[月./\\-](\\d{1,2})日?",
+    "date_regex": "((?:19|20)\\d{2})\\s*[年./\\-]\\s*(\\d{1,2})\\s*[月./\\-]\\s*(\\d{1,2})\\s*日?"
+  },
+  "items": {
+    "mode": "none"
+  }
+}

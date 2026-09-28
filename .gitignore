@@ -1,0 +1,8 @@
+.workbuddy/
+*.rar
+backend/data/
+__pycache__/
+*.pyc
+*.pyo
+*.pid
+*.log
